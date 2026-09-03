@@ -1,0 +1,15 @@
+jobs:
+  approve-budget:
+    needs: estimate-budget
+    uses: ./.github/workflows/budget-approval.yml
+    with:
+      budget: ${{ fromJSON(needs.estimate-budget.outputs.budget) }}
+      approval_threshold: 25
+
+  run-codex:
+    needs: approve-budget
+    if: needs.approve-budget.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Codex
+        run: echo "Start Codex here"
