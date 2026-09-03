@@ -1,0 +1,66 @@
+name: Send new issues to agent
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  notify-agent:
+    name: Send issue to external agent API
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Build agent input
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          jq \
+            --arg run_id "$GITHUB_RUN_ID" \
+            '{
+              input: (
+                "A new GitHub issue was opened.\n\n" +
+                "Repository: " + .repository.full_name + "\n" +
+                "Issue: #" + (.issue.number | tostring) + "\n" +
+                "Title: " + .issue.title + "\n" +
+                "Author: " + .issue.user.login + "\n" +
+                "URL: " + .issue.html_url + "\n\n" +
+                "Body:\n" + (.issue.body // "")
+              ),
+              metadata: {
+                source: "github",
+                event: "issues.opened",
+                repository: .repository.full_name,
+                issue_number: .issue.number,
+                run_id: $run_id
+              },
+              issue: .issue
+            }' \
+            "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/agent-payload.json"
+
+      - name: Call agent webhook
+        env:
+          AGENT_API_URL: ${{ secrets.AGENT_API_URL }}
+          AGENT_API_TOKEN: ${{ secrets.AGENT_API_TOKEN }}
+        run: |
+          if [[ -z "$AGENT_API_URL" || -z "$AGENT_API_TOKEN" ]]; then
+            echo "::error::AGENT_API_URL and AGENT_API_TOKEN secrets must be configured."
+            exit 1
+          fi
+
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --request POST \
+            --header "Authorization: Bearer $AGENT_API_TOKEN" \
+            --header "Content-Type: application/json" \
+            --header "Idempotency-Key: github-issue-${{ github.repository }}-${{ github.event.issue.number }}" \
+            --data-binary "@$RUNNER_TEMP/agent-payload.json" \
+            "$AGENT_API_URL"
