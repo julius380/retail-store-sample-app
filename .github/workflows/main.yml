@@ -1,66 +1,96 @@
-name: Send new issues to agent
+name: GitHub Actions Demo
+
+run-name: ${{ github.actor }} is testing out GitHub Actions 🚀
 
 on:
-  issues:
-    types: [opened]
+  push:
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: Requested agent budget
+        required: true
+        default: 25
+        type: number
+      approval_threshold:
+        description: Budgets above this value require human approval
+        required: true
+        default: 25
+        type: number
 
-permissions: {}
+permissions:
+  contents: read
+  issues: write
 
 jobs:
-  notify-agent:
-    name: Send issue to external agent API
+  Explore-GitHub-Actions:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
 
     steps:
-      - name: Build agent input
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
-        run: |
-          jq \
-            --arg run_id "$GITHUB_RUN_ID" \
-            '{
-              input: (
-                "A new GitHub issue was opened.\n\n" +
-                "Repository: " + .repository.full_name + "\n" +
-                "Issue: #" + (.issue.number | tostring) + "\n" +
-                "Title: " + .issue.title + "\n" +
-                "Author: " + .issue.user.login + "\n" +
-                "URL: " + .issue.html_url + "\n\n" +
-                "Body:\n" + (.issue.body // "")
-              ),
-              metadata: {
-                source: "github",
-                event: "issues.opened",
-                repository: .repository.full_name,
-                issue_number: .issue.number,
-                run_id: $run_id
-              },
-              issue: .issue
-            }' \
-            "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/agent-payload.json"
+      - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
 
-      - name: Call agent webhook
+      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
+
+      - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
+
+      - name: Check out repository code
+        uses: actions/checkout@v6
+
+      - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
+
+      - run: echo "🖥️ The workflow is now ready to test your code on the runner."
+
+      - name: List files in the repository
+        run: ls "$GITHUB_WORKSPACE"
+
+      - name: Evaluate requested budget
+        id: budget
         env:
-          AGENT_API_URL: ${{ secrets.AGENT_API_URL }}
-          AGENT_API_TOKEN: ${{ secrets.AGENT_API_TOKEN }}
+          REQUESTED_BUDGET: ${{ inputs.budget || vars.DEFAULT_AGENT_BUDGET || '0' }}
+          APPROVAL_THRESHOLD: ${{ inputs.approval_threshold || vars.AGENT_APPROVAL_THRESHOLD || '25' }}
         run: |
-          if [[ -z "$AGENT_API_URL" || -z "$AGENT_API_TOKEN" ]]; then
-            echo "::error::AGENT_API_URL and AGENT_API_TOKEN secrets must be configured."
+          if ! jq --null-input --exit-status \
+            --argjson budget "$REQUESTED_BUDGET" \
+            --argjson threshold "$APPROVAL_THRESHOLD" \
+            '$budget >= 0 and $threshold >= 0' > /dev/null; then
+            echo "::error::The budget and approval threshold must be non-negative numbers."
             exit 1
           fi
 
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            --retry 3 \
-            --retry-all-errors \
-            --connect-timeout 10 \
-            --max-time 30 \
-            --request POST \
-            --header "Authorization: Bearer $AGENT_API_TOKEN" \
-            --header "Content-Type: application/json" \
-            --header "Idempotency-Key: github-issue-${{ github.repository }}-${{ github.event.issue.number }}" \
-            --data-binary "@$RUNNER_TEMP/agent-payload.json" \
-            "$AGENT_API_URL"
+          requires_approval="$(
+            jq --null-input --raw-output \
+              --argjson budget "$REQUESTED_BUDGET" \
+              --argjson threshold "$APPROVAL_THRESHOLD" \
+              '$budget > $threshold'
+          )"
+
+          echo "budget=$REQUESTED_BUDGET" >> "$GITHUB_OUTPUT"
+          echo "threshold=$APPROVAL_THRESHOLD" >> "$GITHUB_OUTPUT"
+          echo "requires_approval=$requires_approval" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for manual approval
+        if: ${{ steps.budget.outputs.requires_approval == 'true' }}
+        uses: trstringer/manual-approval@v1
+        timeout-minutes: 60
+        with:
+          secret: ${{ github.token }}
+          # Replace app1 with one or more comma-separated GitHub usernames.
+          approvers: app1
+          minimum-approvals: 1
+          issue-title: "Approve agent budget ${{ steps.budget.outputs.budget }}"
+          issue-body: |
+            Please approve or deny this agent run.
+
+            Repository: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Requested budget: ${{ steps.budget.outputs.budget }}
+            Automatic approval threshold: ${{ steps.budget.outputs.threshold }}
+          exclude-workflow-initiator-as-approver: false
+          fail-on-denial: true
+          additional-approved-words: ""
+          additional-denied-words: ""
+          polling-interval-seconds: 10
+
+      - name: Continue after budget approval
+        run: |
+          if [[ "${{ steps.budget.outputs.requires_approval }}" == "true" ]]; then
